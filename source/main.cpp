@@ -30,8 +30,9 @@
 constexpr uint32_t maxFramesInFlight{ 2 }; // two buffers - front and back
 
 // global variables
-uint32_t imageIndex{ 0 };
-uint32_t frameIndex{ 0 };
+uint32_t imageIndex{ 0 }; // got from the swapchain on line 207
+uint32_t frameIndex{ 0 }; // 0 or 1, used to select the current frame's resources
+                          // (shaderDataBuffers[frameIndex], fences[frameIndex], imageAcquiredSemaphores[frameIndex])
 
 // Vulkan objects
 VkInstance instance{ VK_NULL_HANDLE };
@@ -57,9 +58,12 @@ std::vector<VkImage> swapchainImages; // 2, got from swapchain, passed to views
 std::vector<VkImageView> swapchainImageViews;
 
 std::array<VkCommandBuffer, maxFramesInFlight> commandBuffers;
-std::array<VkFence, maxFramesInFlight> fences;
-std::array<VkSemaphore, maxFramesInFlight> presentSemaphores;
-std::vector<VkSemaphore> renderSemaphores;
+
+// Fence tells CPU when GPU has finished the commands in the queue and can change uniforms, create new queue
+std::array<VkFence, maxFramesInFlight> fences; // fences[frameIndex] - GPU finished commandBuffer Q (frame)
+
+std::array<VkSemaphore, maxFramesInFlight> imageAcquiredSemaphores;  // imageAcquiredSemaphores
+std::vector<VkSemaphore> renderCompleteSemaphores;  // renderCompleteSemaphores[imageIndex] GPU finished rendering the frame
 VmaAllocation vBufferAllocation{ VK_NULL_HANDLE };
 VkBuffer vBuffer{ VK_NULL_HANDLE };
 struct ShaderData {
@@ -257,19 +261,39 @@ int main(int argc, char* argv[])
 	}
 
 	// 7. Swap chain
+
+  // .present mode tests:
+  // https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html#
+  // více obrázkù v swapchainu - 2,3,4,5,6,7,8 - zvyšuje to latenci pro FIFO_KHR
+   uint32_t desiredImageCount{ 64 };
+   desiredImageCount = std::max(desiredImageCount, surfaceCaps.minImageCount);
+   if (surfaceCaps.maxImageCount > 0) {  // 0 means no limits, only total amount of memory
+     desiredImageCount = std::min(desiredImageCount, surfaceCaps.maxImageCount);
+   }
+  // on Intel UHD - all modes made a huge latency for .minImageCount = 64, none of them dropped any frame.
+  // all cached all movements
+  // on NVIDIA, 8 images max, all were fast, latency not visible
+  //
+  // .minImageCount = desiredImageCount,
+  // .presentMode = VK_PRESENT_MODE_SHARED_DEMAND_REFRESH_KHR,
+  // .presentMode = VK_PRESENT_MODE_MAILBOX_KHR, // This should drop frames, but huge latency, 64 frames in flight, no tearing, vsync, but can drop frames but doesn't do it
+  //.presentMode = VK_PRESENT_MODE_FIFO_LATEST_READY_KHR, // latest ready image, no tearing, vsync, 1 frame latency
+
+
 	const VkFormat imageFormat{ VK_FORMAT_B8G8R8A8_SRGB };
-	VkSwapchainCreateInfoKHR swapchainCI{
-		.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-		.surface = surface,
-		.minImageCount = surfaceCaps.minImageCount, // from range 2..8
-		.imageFormat = imageFormat,
+  VkSwapchainCreateInfoKHR swapchainCI{
+    .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+    .surface = surface,
+    //.minImageCount = surfaceCaps.minImageCount, // from range 2..8 on NVIDIA, Intel has 2..64 
+    .minImageCount = desiredImageCount,
+    .imageFormat = imageFormat,
 		.imageColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
 		.imageExtent{.width = swapchainExtent.width, .height = swapchainExtent.height },
 		.imageArrayLayers = 1,
 		.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 		.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
 		.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-		.presentMode = VK_PRESENT_MODE_FIFO_KHR
+    .presentMode = VK_PRESENT_MODE_FIFO_KHR // required, no tearing, vsync, 1 frame latency, 2 frames in flight
 	};
 	chk(vkCreateSwapchainKHR(device, &swapchainCI, nullptr, &swapchain));
 
@@ -366,10 +390,12 @@ int main(int argc, char* argv[])
     VkBufferCreateInfo uBufferCI{
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = sizeof(ShaderData),
-      .usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+      .usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT  // access this buffer via its device address
     };
     VmaAllocationCreateInfo uBufferAllocCI{
-      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT 
+             | VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT // uncached and write-combined memory type
+             | VMA_ALLOCATION_CREATE_MAPPED_BIT, // mapped persistently to host address space
       .usage = VMA_MEMORY_USAGE_AUTO
     };
     chk(vmaCreateBuffer(allocator, &uBufferCI, &uBufferAllocCI, &shaderDataBuffers[i].buffer, &shaderDataBuffers[i].allocation, &shaderDataBuffers[i].allocationInfo));
@@ -386,10 +412,10 @@ int main(int argc, char* argv[])
 	VkFenceCreateInfo fenceCI{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
 	for (auto i = 0; i < maxFramesInFlight; i++) {
 		chk(vkCreateFence(device, &fenceCI, nullptr, &fences[i]));
-		chk(vkCreateSemaphore(device, &semaphoreCI, nullptr, &presentSemaphores[i]));
+		chk(vkCreateSemaphore(device, &semaphoreCI, nullptr, &imageAcquiredSemaphores[i]));
 	}
-	renderSemaphores.resize(swapchainImages.size());
-	for (auto& semaphore : renderSemaphores) {
+	renderCompleteSemaphores.resize(swapchainImages.size());
+	for (auto& semaphore : renderCompleteSemaphores) {
 		chk(vkCreateSemaphore(device, &semaphoreCI, nullptr, &semaphore));
 	}
 
@@ -747,7 +773,10 @@ int main(int argc, char* argv[])
 	  // a) Sync
 		chk(vkWaitForFences(device, 1, &fences[frameIndex], true, UINT64_MAX));
 		chk(vkResetFences(device, 1, &fences[frameIndex]));
-		chkSwapchain(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, presentSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex));
+
+    // ask the swapchain for the next imageIndex to render to, and signal the present semaphore when ready
+    // pro aktuální frameIndex, který se bude renderovat, získat imageIndex z swapchainu
+    chkSwapchain(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex));  
 
 	  // b) Update shader data
 		shaderData.projection = glm::perspective(glm::radians(45.0f), (float)windowSize.x / (float)windowSize.y, 0.1f, 32.0f);
@@ -776,7 +805,7 @@ int main(int argc, char* argv[])
 				.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 				.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 				.newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-				.image = swapchainImages[imageIndex],
+        .image = swapchainImages[imageIndex],  // image to render to (got from swapchain)
 				.subresourceRange{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
 			},
 			VkImageMemoryBarrier2{
@@ -860,20 +889,24 @@ int main(int argc, char* argv[])
 		VkSubmitInfo submitInfo{
 			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
 			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = &presentSemaphores[frameIndex],
+      .pWaitSemaphores = &imageAcquiredSemaphores[frameIndex],  // wait for image to be available (finished presenting)
 			.pWaitDstStageMask = &waitStages,
 			.commandBufferCount = 1,
 			.pCommandBuffers = &cb, //prepared commands
 			.signalSemaphoreCount = 1,
-			.pSignalSemaphores = &renderSemaphores[imageIndex],
+      .pSignalSemaphores = &renderCompleteSemaphores[imageIndex],  // signal when finished rendering image
 		};
 		chk(vkQueueSubmit(queue, 1, &submitInfo, fences[frameIndex]));
+    // 1. wait for image given by presentation engine
+    // 2. execute command buffer cb and render to image
+    // 3. signal renderSemaphore when finished rendering image
+    // 4. signal fence when finished rendering image to CPU - can start next frame
 
 		frameIndex = (frameIndex + 1) % maxFramesInFlight;
 		VkPresentInfoKHR presentInfo{
 			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
 			.waitSemaphoreCount = 1,
-			.pWaitSemaphores = &renderSemaphores[imageIndex],
+			.pWaitSemaphores = &renderCompleteSemaphores[imageIndex],
 			.swapchainCount = 1,
 			.pSwapchains = &swapchain,
 			.pImageIndices = &imageIndex
@@ -935,12 +968,12 @@ int main(int argc, char* argv[])
 				chk(vkCreateImageView(device, &viewCI, nullptr, &swapchainImageViews[i]));
 			}
 
-			for (auto& semaphore : renderSemaphores) {
+			for (auto& semaphore : renderCompleteSemaphores) {
 				vkDestroySemaphore(device, semaphore, nullptr);
 			}
 
-			renderSemaphores.resize(imageCount);
-			for (auto& semaphore : renderSemaphores) {
+			renderCompleteSemaphores.resize(imageCount);
+			for (auto& semaphore : renderCompleteSemaphores) {
 				chk(vkCreateSemaphore(device, &semaphoreCI, nullptr, &semaphore));
 			}
 
@@ -962,11 +995,11 @@ int main(int argc, char* argv[])
 
 	for (auto i = 0; i < maxFramesInFlight; i++) {
 		vkDestroyFence(device, fences[i], nullptr);
-		vkDestroySemaphore(device, presentSemaphores[i], nullptr);
+		vkDestroySemaphore(device, imageAcquiredSemaphores[i], nullptr);
 		vmaDestroyBuffer(allocator, shaderDataBuffers[i].buffer, shaderDataBuffers[i].allocation);
 	}
-	for (auto i = 0; i < renderSemaphores.size(); i++) {
-		vkDestroySemaphore(device, renderSemaphores[i], nullptr);
+	for (auto i = 0; i < renderCompleteSemaphores.size(); i++) {
+		vkDestroySemaphore(device, renderCompleteSemaphores[i], nullptr);
 	}
 
 	vmaDestroyImage(allocator, depthImage, depthImageAllocation);
