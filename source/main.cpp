@@ -264,7 +264,7 @@ int main(int argc, char* argv[])
 
   // .present mode tests:
   // https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html#
-  // více obrázkù v swapchainu - 2,3,4,5,6,7,8 - zvyšuje to latenci pro FIFO_KHR
+  // more swapchain images - 2,3,4,5,6,7,8 - increase latency for FIFO_KHR
    uint32_t desiredImageCount{ 64 };
    desiredImageCount = std::max(desiredImageCount, surfaceCaps.minImageCount);
    if (surfaceCaps.maxImageCount > 0) {  // 0 means no limits, only total amount of memory
@@ -365,7 +365,7 @@ int main(int argc, char* argv[])
 			.uv = { attrib.texcoords[index.texcoord_index * 2], 1.0 - attrib.texcoords[index.texcoord_index * 2 + 1] }
 		};
 		vertices.push_back(v);
-		indices.push_back(indices.size()); // indexuje od 0 vzestupne, ignoruje obj indexy, které jsou stejné
+		indices.push_back(indices.size()); // starts indexing from 0, and ignores indices in .obj that are the same
 	}
 	VkDeviceSize vBufSize{ sizeof(Vertex) * vertices.size() };
 	VkDeviceSize iBufSize{ sizeof(uint16_t) * indices.size() };
@@ -682,7 +682,7 @@ int main(int argc, char* argv[])
 	slang::SessionDesc slangSessionDesc{
 	  .targets{slangTargets.data()},
 	  .targetCount{SlangInt(slangTargets.size())},
-	  .defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR, // po sloupcích
+	  .defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_COLUMN_MAJOR, // column-wise
 	  .compilerOptionEntries{slangOptions.data()},
 	  .compilerOptionEntryCount{uint32_t(slangOptions.size())}
 	};
@@ -728,7 +728,7 @@ int main(int argc, char* argv[])
 		{ .location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, uv) },
 	};
 
-  // d) fill `VkPipeline*CreateInfo` structures = standard pipeline values
+  // d) fill `VkPipeline*CreateInfo` structures = standard pipeline values
   VkPipelineVertexInputStateCreateInfo vertexInputState{
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 		.vertexBindingDescriptionCount = 1,
@@ -774,9 +774,10 @@ int main(int argc, char* argv[])
 		chk(vkWaitForFences(device, 1, &fences[frameIndex], true, UINT64_MAX));
 		chk(vkResetFences(device, 1, &fences[frameIndex]));
 
-    // ask the swapchain for the next imageIndex to render to, and signal the present semaphore when ready
-    // pro aktuální frameIndex, který se bude renderovat, získat imageIndex z swapchainu
-    chkSwapchain(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex));  
+	// Rendering of frameIndex image:
+	// Ask the swapchain for the next imageIndex to render to
+	// and signal the present semaphore when finished
+	chkSwapchain(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex));  
 
 	  // b) Update shader data
 		shaderData.projection = glm::perspective(glm::radians(45.0f), (float)windowSize.x / (float)windowSize.y, 0.1f, 32.0f);
