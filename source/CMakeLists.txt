@@ -13,6 +13,12 @@ else()
     message(STATUS "Found Vulkan SDK in $ENV{VULKAN_SDK}")
 endif()
 
+# This project builds the same tutorial twice, differing only in the windowing
+# library. SDL3 ships with the Vulkan SDK, GLFW does not and is fetched below.
+#   HowToVulkan     <- main.cpp       uses SDL3
+#   HowToVulkanGLFW <- main-glfw.cpp  uses GLFW
+# main-glfw.cpp is generated: python tools/make-glfw-variant.py
+#
 # SDL3, Volk, VMA, glm and Slang are taken from the SDK
 include_directories(SYSTEM $ENV{VULKAN_SDK}/include)
 # These are not part of the SDK
@@ -31,6 +37,19 @@ if (NOT WIN32)
         SYSTEM)
     FetchContent_MakeAvailable(GLM)
 endif()
+
+# GLFW is not part of the Vulkan SDK, so unlike SDL3 it is built from source.
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(GLFW
+    GIT_REPOSITORY https://github.com/glfw/glfw
+    GIT_TAG 3.4
+    GIT_SHALLOW ON
+    EXCLUDE_FROM_ALL
+    SYSTEM)
+FetchContent_MakeAvailable(GLFW)
 
 set(KTX_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/ktx)
 set(KTX_SOURCES
@@ -65,14 +84,23 @@ if(MSVC)
 endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/")
 
-add_executable(${NAME} main.cpp assets/shader.slang)
-target_compile_definitions(${NAME} PRIVATE VK_NO_PROTOTYPES)
-if (WIN32)
-    target_compile_definitions(${NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
-endif()
-set_target_properties(${NAME} PROPERTIES DEBUGGER_WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_features(${NAME} PRIVATE cxx_std_20)
-target_link_libraries(${NAME} PRIVATE ${SDL_LIBRARY} ktx ${Slang_LIBRARY})
-if (NOT WIN32)
-    target_link_libraries(${NAME} PRIVATE glm::glm-header-only)
-endif()
+add_executable(${NAME}     main.cpp      assets/shader.slang)
+add_executable(${NAME}GLFW main-glfw.cpp assets/shader.slang)
+
+# Everything below is identical for both variants
+foreach(TUTORIAL_TARGET ${NAME} ${NAME}GLFW)
+    target_compile_definitions(${TUTORIAL_TARGET} PRIVATE VK_NO_PROTOTYPES)
+    if (WIN32)
+        target_compile_definitions(${TUTORIAL_TARGET} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    set_target_properties(${TUTORIAL_TARGET} PROPERTIES DEBUGGER_WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_features(${TUTORIAL_TARGET} PRIVATE cxx_std_20)
+    target_link_libraries(${TUTORIAL_TARGET} PRIVATE ktx ${Slang_LIBRARY})
+    if (NOT WIN32)
+        target_link_libraries(${TUTORIAL_TARGET} PRIVATE glm::glm-header-only)
+    endif()
+endforeach()
+
+# ...and this is the only build difference between them
+target_link_libraries(${NAME}     PRIVATE ${SDL_LIBRARY})
+target_link_libraries(${NAME}GLFW PRIVATE glfw)
