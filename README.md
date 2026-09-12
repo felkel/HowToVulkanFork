@@ -11,7 +11,7 @@ Home of a minimalist tutorial on how to use the Vulkan graphics API in 2026. The
 1. `main.cpp` is now a more commented and slightly more formatted version by myself
 2. `main-orig.cpp` is Sasha's original `main.cpp`
 3. `main-glfw.cpp` is a claude generated replacement of SDL by GLFW  
-4. [`sdl-glfw-diff.md`](../sdl-glfw-diff.md) is a table describing the changes from SDL to GLFW
+4. [`sdl-glfw-diff.md`](sdl-glfw-diff.md) is a table describing the changes from SDL to GLFW
    Use this table for orientation and `diff main.cpp main-glfw.cpp` for locating the specific lines.
    
 - In case of any change in `main.cpp`:

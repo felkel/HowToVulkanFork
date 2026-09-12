@@ -42,8 +42,22 @@ GLFW file by hand.
 | `SDLK_MINUS`, `SDLK_KP_MINUS` | `GLFW_KEY_MINUS`, `GLFW_KEY_KP_SUBTRACT` | same caveat |
 | `SDL_EVENT_WINDOW_RESIZED` | `glfwSetFramebufferSizeCallback` | both just set `updateSwapchain` |
 | `SDL_DestroyWindow`<br>`SDL_QuitSubSystem(SDL_INIT_VIDEO)`<br>`SDL_Quit()` | `glfwDestroyWindow`<br>`glfwTerminate()` | one call fewer, there is no subsystem to quit separately |
-| `find_library(SDL_LIBRARY NAMES SDL3 HINTS "$ENV{VULKAN_SDK}/lib")` | `FetchContent_Declare(GLFW ... GIT_TAG 3.4)` | GLFW does not ship with the Vulkan SDK, so it is built from source, following the pattern already used for GLM |
-| `target_link_libraries(... ${SDL_LIBRARY} ...)` | `target_link_libraries(... glfw ...)` | links statically, so the runtime DLL the SDL build needed is gone |
+
+
+## Build file
+
+`source/CMakeLists.txt` builds both variants from one configure. Below are the lines
+that differ, compared against the original single-variant file.
+
+| SDL | GLFW | `       comment        `|
+|--|--|---|
+| `find_library(SDL_LIBRARY NAMES SDL3 HINTS "$ENV{VULKAN_SDK}/lib" REQUIRED)` | `FetchContent_Declare(GLFW`<br>`  GIT_REPOSITORY https://github.com/glfw/glfw`<br>`  GIT_TAG 3.4 ...)`<br>`FetchContent_MakeAvailable(GLFW)` | SDL3 ships with the Vulkan SDK and only has to be located; GLFW does not, so it is fetched and built from source, the same pattern the file already used for GLM |
+| *(nothing needed)* | `set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)`<br>`set(GLFW_BUILD_TESTS OFF ...)`<br>`set(GLFW_BUILD_EXAMPLES OFF ...)`<br>`set(GLFW_INSTALL OFF ...)` | must come before `FetchContent_MakeAvailable`, otherwise GLFW builds its docs, tests and examples too |
+| `add_executable(${NAME} main.cpp assets/shader.slang)` | `add_executable(${NAME}GLFW main-glfw.cpp assets/shader.slang)` | one target per variant; the shader is listed only so it shows up in the IDE project |
+| the `target_compile_definitions`, `set_target_properties` and `target_compile_features` calls, written once | the same calls wrapped in `foreach(TUTORIAL_TARGET ${NAME} ${NAME}GLFW)` | these settings are identical for both variants, so they are written once instead of duplicated |
+| `target_link_libraries(${NAME} PRIVATE ${SDL_LIBRARY} ktx ${Slang_LIBRARY})` | `target_link_libraries(${TUTORIAL_TARGET} PRIVATE ktx ${Slang_LIBRARY})` inside the loop, then<br>`target_link_libraries(${NAME} PRIVATE ${SDL_LIBRARY})`<br>`target_link_libraries(${NAME}GLFW PRIVATE glfw)` | the shared libraries move into the loop, so the two adjacent lines left over are the whole build difference between the variants |
+| executable needs `SDL3.dll` on `PATH` or beside it | nothing to copy | GLFW builds as a static library by default, so the GLFW executable has no runtime dependency |
+
 
 ## Verification
 
