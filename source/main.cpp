@@ -247,7 +247,7 @@ int main(int argc, char* argv[])
 
   //--------------------------------------------------------------------------------------
   // 6. Window and surface
-	SDL_Window* window = SDL_CreateWindow("How to Vulkan", 1280u, 720u, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
 	assert(window);
 	chk(SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface));
 	chk(SDL_GetWindowSize(window, &windowSize.x, &windowSize.y));
@@ -902,6 +902,11 @@ int main(int argc, char* argv[])
     // 2. execute command buffer cb and render to image
     // 3. signal renderSemaphore when finished rendering image
     // 4. signal fence when finished rendering image to CPU - can start next frame
+    // 3. and 4. signal the same event - this submission finished executing on the
+    //    GPU - but they wake different waiters:
+    //      fence     -> the CPU, so reusing cb and shaderDataBuffers[frameIndex] is safe
+    //      semaphore -> the GPU, holds back vkQueuePresentKHR until the image is drawn
+    //    A fence reports completion to the CPU, a semaphore reports it to the GPU.
 
 		frameIndex = (frameIndex + 1) % maxFramesInFlight;
 		VkPresentInfoKHR presentInfo{

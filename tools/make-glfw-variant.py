@@ -12,6 +12,7 @@ let version control show whether the GLFW variant needs re-committing.
 Every anchor below is plain ASCII C++ code, so translating or re-wording the
 comments in main.cpp does not affect this script.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -141,22 +142,6 @@ EDITS = [
     # --- presentation support ---
     ("chk(SDL_Vulkan_GetPresentationSupport(instance, devices[deviceIndex], queueFamily));",
      "chk(glfwGetPhysicalDevicePresentationSupport(instance, devices[deviceIndex], queueFamily));"),
-    # --- window, surface and callback registration ---
-    ("\tSDL_Window* window = SDL_CreateWindow(\"How to Vulkan\", 1280u, 720u, "
-     "SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);\n"
-     "\tassert(window);\n"
-     "\tchk(SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface));\n"
-     "\tchk(SDL_GetWindowSize(window, &windowSize.x, &windowSize.y));\n",
-     "\tglfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // no OpenGL context, this is a Vulkan window\n"
-     "\tglfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);\n"
-     "\tGLFWwindow* window = glfwCreateWindow(1280, 720, \"How to Vulkan\", nullptr, nullptr);\n"
-     "\tassert(window);\n"
-     "\tchk(glfwCreateWindowSurface(instance, window, nullptr, &surface));\n"
-     "\tglfwGetFramebufferSize(window, &windowSize.x, &windowSize.y);\n"
-     "\tglfwSetCursorPosCallback(window, cursorPosCallback);\n"
-     "\tglfwSetScrollCallback(window, scrollCallback);\n"
-     "\tglfwSetKeyCallback(window, keyCallback);\n"
-     "\tglfwSetFramebufferSizeCallback(window, framebufferSizeCallback);\n"),
     # --- frame timing: GLFW counts seconds, SDL_GetTicks counted milliseconds ---
     ("\tuint64_t lastTime{ SDL_GetTicks() };",
      "\tdouble lastTime{ glfwGetTime() };  // GLFW counts seconds, SDL_GetTicks counted milliseconds"),
@@ -172,8 +157,42 @@ EDITS = [
 ]
 
 
+# Window creation, surface and callback registration. This one block is matched by
+# pattern rather than verbatim, because the window title is cosmetic and gets tweaked;
+# everything structural in it still has to match exactly. A title naming SDL is
+# rewritten to name GLFW, so "How to Vulkan (SDL)" becomes "How to Vulkan (GLFW)".
+WINDOW_RE = re.compile(
+    r'(?P<i0>[ \t]*)SDL_Window\* window = SDL_CreateWindow\((?P<title>"[^"]*"), 1280u, 720u, '
+    r'SDL_WINDOW_VULKAN \| SDL_WINDOW_RESIZABLE\);\n'
+    r'(?P<i1>[ \t]*)assert\(window\);\n'
+    r'(?P<i2>[ \t]*)chk\(SDL_Vulkan_CreateSurface\(window, instance, nullptr, &surface\)\);\n'
+    r'(?P<i3>[ \t]*)chk\(SDL_GetWindowSize\(window, &windowSize\.x, &windowSize\.y\)\);\n')
+
+
+def port_window(match):
+    i0, i1, i2, i3 = (match.group(n) for n in ("i0", "i1", "i2", "i3"))
+    title = match.group("title").replace("SDL", "GLFW")
+    return (
+        i0 + "glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // no OpenGL context, this is a Vulkan window\n"
+        + i0 + "glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);\n"
+        + i0 + "GLFWwindow* window = glfwCreateWindow(1280, 720, " + title + ", nullptr, nullptr);\n"
+        + i1 + "assert(window);\n"
+        + i2 + "chk(glfwCreateWindowSurface(instance, window, nullptr, &surface));\n"
+        + i3 + "glfwGetFramebufferSize(window, &windowSize.x, &windowSize.y);\n"
+        + i3 + "glfwSetCursorPosCallback(window, cursorPosCallback);\n"
+        + i3 + "glfwSetScrollCallback(window, scrollCallback);\n"
+        + i3 + "glfwSetKeyCallback(window, keyCallback);\n"
+        + i3 + "glfwSetFramebufferSizeCallback(window, framebufferSizeCallback);\n")
+
+
 def generate(text):
     """Apply every edit to the SDL source text and return the GLFW variant."""
+    text, n = WINDOW_RE.subn(port_window, text)
+    if n != 1:
+        raise SystemExit(
+            "window creation block matched %d times, expected exactly 1 "
+            "(did its structure change?)" % n)
+
     for old, new in EDITS:
         found = text.count(old)
         if found != 1:

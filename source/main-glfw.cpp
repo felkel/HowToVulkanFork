@@ -292,9 +292,9 @@ int main(int argc, char* argv[])
 
   //--------------------------------------------------------------------------------------
   // 6. Window and surface
-	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // no OpenGL context, this is a Vulkan window
-	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-	GLFWwindow* window = glfwCreateWindow(1280, 720, "How to Vulkan", nullptr, nullptr);
+glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // no OpenGL context, this is a Vulkan window
+glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+GLFWwindow* window = glfwCreateWindow(1280, 720, "How to Vulkan (GLFW)", nullptr, nullptr);
 	assert(window);
 	chk(glfwCreateWindowSurface(instance, window, nullptr, &surface));
 	glfwGetFramebufferSize(window, &windowSize.x, &windowSize.y);
@@ -953,6 +953,11 @@ int main(int argc, char* argv[])
     // 2. execute command buffer cb and render to image
     // 3. signal renderSemaphore when finished rendering image
     // 4. signal fence when finished rendering image to CPU - can start next frame
+    // 3. and 4. signal the same event - this submission finished executing on the
+    //    GPU - but they wake different waiters:
+    //      fence     -> the CPU, so reusing cb and shaderDataBuffers[frameIndex] is safe
+    //      semaphore -> the GPU, holds back vkQueuePresentKHR until the image is drawn
+    //    A fence reports completion to the CPU, a semaphore reports it to the GPU.
 
 		frameIndex = (frameIndex + 1) % maxFramesInFlight;
 		VkPresentInfoKHR presentInfo{

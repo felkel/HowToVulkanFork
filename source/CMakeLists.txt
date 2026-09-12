@@ -84,6 +84,9 @@ if(MSVC)
 endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/")
 
+# force to use NVIDIA GPU on Dell laptops with hybrid graphics
+# set_target_properties(${NAME} PROPERTIES VS_DEBUGGER_COMMAND_ARGUMENTS "1")
+
 add_executable(${NAME}     main.cpp      assets/shader.slang)
 add_executable(${NAME}GLFW main-glfw.cpp assets/shader.slang)
 
