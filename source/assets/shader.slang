@@ -12,19 +12,19 @@ struct VSInput {
 
 Sampler2D textures[];
 
-struct ShaderData {
+struct ShaderData {  // uniforms, passed to main
     float4x4 projection;
     float4x4 view;
     float4x4 model[3];
     float4 lightPos;
-    uint32_t selected;
+    uint32_t selected; // selected model 0,1,2
 };
 
 struct VSOutput {
-    float4 Pos : SV_POSITION;
+    float4 Pos : SV_POSITION; // System Value - position in clip space (~gl_Position)
     float3 Normal;
     float2 UV;
-    float3 Factor;
+    float3 Factor; // 1 or 3 to highlight the selected model
     float3 LightVec;
     float3 ViewVec;
     uint32_t InstanceIndex;

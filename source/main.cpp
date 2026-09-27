@@ -1,5 +1,7 @@
 /* Copyright (c) 2025-2026, Sascha Willems
  * SPDX-License-Identifier: MIT
+ *
+ * Comments and slight modifications: Petr Felkel, 2026
  */
 
 #define VOLK_IMPLEMENTATION
@@ -44,34 +46,40 @@ VkSwapchainKHR swapchain{ VK_NULL_HANDLE };
 VkCommandPool commandPool{ VK_NULL_HANDLE };
 VkPipeline pipeline{ VK_NULL_HANDLE };
 VkPipelineLayout pipelineLayout{ VK_NULL_HANDLE };
-VkImage depthImage;  // single depth buffer
 
 // VMA allocator for images (depthImage, texture) and buffers (vBuffer and shader buffers)
 VmaAllocator allocator{ VK_NULL_HANDLE };
 
-// depth
+// single depth buffer
+VkImage depthImage;
 VmaAllocation depthImageAllocation;
 VkImageView depthImageView;
 
-// swapchain - 
+// swapchain - uses [imageIndex] to select the current image for rendering
 std::vector<VkImage> swapchainImages; // 2, got from swapchain, passed to views
 std::vector<VkImageView> swapchainImageViews;
 
+// structures for shader data for each frame in flight [frameIndex]
+//   command buffers[frameIndex]
 std::array<VkCommandBuffer, maxFramesInFlight> commandBuffers;
 
-// Fence tells CPU when GPU has finished the commands in the queue and can change uniforms, create new queue
-std::array<VkFence, maxFramesInFlight> fences; // fences[frameIndex] - GPU finished commandBuffer Q (frame)
+//   fences[frameIndex] - tell CPU when GPU has finished the commands in the commandBuffer[] and can change uniforms, create new queue
+std::array<VkFence, maxFramesInFlight> fences; 
 
 std::array<VkSemaphore, maxFramesInFlight> imageAcquiredSemaphores;  // imageAcquiredSemaphores
 std::vector<VkSemaphore> renderCompleteSemaphores;  // renderCompleteSemaphores[imageIndex] GPU finished rendering the frame
 VmaAllocation vBufferAllocation{ VK_NULL_HANDLE };
+
+// buffer for Suzanne geometry and indices
 VkBuffer vBuffer{ VK_NULL_HANDLE };
+
+//
 struct ShaderData {
-	glm::mat4 projection;
-	glm::mat4 view;
-	glm::mat4 model[3];
-	glm::vec4 lightPos{ 0.0f, -10.0f, 10.0f, 0.0f };
-	uint32_t selected{ 1 };
+  glm::mat4 projection;
+  glm::mat4 view;
+  glm::mat4 model[3]; //for 3 instances
+  glm::vec4 lightPos{ 0.0f, -10.0f, 10.0f, 0.0f };
+  uint32_t selected{ 1 }; // selected model {0,1,2}
 } shaderData{};
 struct ShaderDataBuffer {
 	VmaAllocation allocation{ VK_NULL_HANDLE };
@@ -80,6 +88,8 @@ struct ShaderDataBuffer {
 	VkDeviceAddress deviceAddress{};
 };
 std::array<ShaderDataBuffer, maxFramesInFlight> shaderDataBuffers;
+
+// textures
 struct Texture {
 	VmaAllocation allocation{ VK_NULL_HANDLE };
 	VkImage image{ VK_NULL_HANDLE };
@@ -87,15 +97,21 @@ struct Texture {
 	VkSampler sampler{ VK_NULL_HANDLE };
 };
 std::array<Texture, 3> textures{};
+
+// Descriptor set layout and pool for texture sampler
 VkDescriptorPool descriptorPool{ VK_NULL_HANDLE };
 VkDescriptorSetLayout descriptorSetLayoutTex{ VK_NULL_HANDLE };
 VkDescriptorSet descriptorSetTex{ VK_NULL_HANDLE };
+
+// Slang session for compiling shaders
 Slang::ComPtr<slang::IGlobalSession> slangGlobalSession;
+
+// camera and object rotations
 glm::vec3 camPos{ 0.0f, 0.0f, -6.0f };
 glm::vec3 objectRotations[3]{};
 glm::ivec2 windowSize{};
 
-// vertex attributes in vBuffer
+// vertex attributes in vBuffer / shader input
 struct Vertex {
 	glm::vec3 pos;
 	glm::vec3 normal;
@@ -103,13 +119,16 @@ struct Vertex {
 };
 
 
-static inline void chkFence(VkResult result) {
+static inline void chkFence(VkResult result, int n=-1) {
+  std::cerr << "The fence";
+  if (n != -1)
+    std::cerr << "[" << n << "]";
   switch (result) {
   case VK_SUCCESS:
-    std::cerr << "The fence is signaled - " << result << ")\n";
+    std::cerr << " is signaled" << "\n";
     break;
   case VK_NOT_READY:
-    std::cerr << "The fence is unsignaled - " << result << ")\n";
+    std::cerr << " is unsignaled" << "\n";
     break;
   }
 }
@@ -207,8 +226,9 @@ int main(int argc, char* argv[])
 	  .descriptorIndexing = true,
 	  .shaderSampledImageArrayNonUniformIndexing = true,
 	  .descriptorBindingVariableDescriptorCount = true,
-	  .runtimeDescriptorArray = true,
-	  .bufferDeviceAddress = true };
+    .runtimeDescriptorArray = true, // enable variable descriptor count, texture[] in shader, and
+	                                  //        descriptorCount > 1 in VkDescriptorSetLayoutBinding
+	  .bufferDeviceAddress = true };  // enable BDA on logical device
 	VkPhysicalDeviceVulkan13Features enabledVk13Features{
 	  .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
 	  .pNext = &enabledVk12Features,
@@ -238,7 +258,7 @@ int main(int argc, char* argv[])
 	  .vkCreateImage = vkCreateImage };
 
 	VmaAllocatorCreateInfo allocatorCI{
-	  .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,  // VK_KHR_buffer_device_address, aw GPU pointers
+	  .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,  // VK_KHR_buffer_device_address, GPU pointers
 	  .physicalDevice = devices[deviceIndex],
 	  .device = device,
 	  .pVulkanFunctions = &vkFunctions,
@@ -265,7 +285,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
   // .present mode tests:
   // https://docs.vulkan.org/refpages/latest/refpages/source/VkPresentModeKHR.html#
   // more swapchain images - 2,3,4,5,6,7,8 - increase latency for FIFO_KHR
-   uint32_t desiredImageCount{ 64 };
+   uint32_t desiredImageCount{ 3 }; // was 2, but this will be different than maxFramesInFlight=2
    desiredImageCount = std::max(desiredImageCount, surfaceCaps.minImageCount);
    if (surfaceCaps.maxImageCount > 0) {  // 0 means no limits, only total amount of memory
      desiredImageCount = std::min(desiredImageCount, surfaceCaps.maxImageCount);
@@ -315,7 +335,11 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 	}
 
 	// 8. Depth attachment
-	std::vector<VkFormat> depthFormatList{ VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT }; // one must be supported - select format in loop
+	std::vector<VkFormat> depthFormatList{
+	  VK_FORMAT_D32_SFLOAT_S8_UINT,
+	  VK_FORMAT_D24_UNORM_S8_UINT
+	}; // one must be supported - select format in loop
+
 	VkFormat depthFormat{ VK_FORMAT_UNDEFINED };
 	for (VkFormat& format : depthFormatList) {
 		VkFormatProperties2 formatProperties{ .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2 };
@@ -385,26 +409,37 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 	memcpy(vBufferAllocInfo.pMappedData, vertices.data(), vBufSize);
 	memcpy(((char*)vBufferAllocInfo.pMappedData) + vBufSize, indices.data(), iBufSize);
 
-	// 9. Shader data buffers uBuffer - per frame
+
+	// 9. Shader data buffers uBuffer
+  //    per frame
+  //    accessed through deviceAddress pointer
+  //    BDA - buffer device address / shader device address
+
+  // both infos are the same for all frames - I moved both out of the loop
+  VkBufferCreateInfo uBufferCI{
+    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    .size = sizeof(ShaderData),
+    .usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT  // access this buffer via its device address - BDA
+  };
+  VmaAllocationCreateInfo uBufferAllocCI{
+    .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+           | VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT // uncached and write-combined memory type
+           | VMA_ALLOCATION_CREATE_MAPPED_BIT, // mapped persistently to host address space
+    .usage = VMA_MEMORY_USAGE_AUTO
+  };
   for (auto i = 0; i < maxFramesInFlight; i++) {
-    VkBufferCreateInfo uBufferCI{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = sizeof(ShaderData),
-      .usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT  // access this buffer via its device address
-    };
-    VmaAllocationCreateInfo uBufferAllocCI{
-      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT 
-             | VMA_ALLOCATION_CREATE_HOST_ACCESS_ALLOW_TRANSFER_INSTEAD_BIT // uncached and write-combined memory type
-             | VMA_ALLOCATION_CREATE_MAPPED_BIT, // mapped persistently to host address space
-      .usage = VMA_MEMORY_USAGE_AUTO
-    };
-    chk(vmaCreateBuffer(allocator, &uBufferCI, &uBufferAllocCI, &shaderDataBuffers[i].buffer, &shaderDataBuffers[i].allocation, &shaderDataBuffers[i].allocationInfo));
+ 
+    chk(vmaCreateBuffer(allocator, &uBufferCI, &uBufferAllocCI, 
+      &shaderDataBuffers[i].buffer, // VkBuffer
+      &shaderDataBuffers[i].allocation, // handle
+      &shaderDataBuffers[i].allocationInfo // type, size, offset, VkMemory, pMappedData 
+    ));
 
     VkBufferDeviceAddressInfo uBufferBdaInfo{
       .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
       .buffer = shaderDataBuffers[i].buffer
     };
-    shaderDataBuffers[i].deviceAddress = vkGetBufferDeviceAddress(device, &uBufferBdaInfo);
+    shaderDataBuffers[i].deviceAddress = vkGetBufferDeviceAddress(device, &uBufferBdaInfo);  // uint64_t
   }
 
 	// 10. Sync objects
@@ -434,6 +469,9 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 	  .commandBufferCount = maxFramesInFlight
 	};
 	chk(vkAllocateCommandBuffers(device, &cbAllocCI, commandBuffers.data()));
+    
+
+  //----------------------------- TEXTURES ------------------------------------
 
   // 12. Texture images(suzanne0, 1, and 2)
   //    a) Load Texture from file
@@ -462,7 +500,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		};
 		chk(vmaCreateImage(allocator, &texImgCI, &texImageAllocCI, &textures[i].image, &textures[i].allocation, nullptr));
 
-		VkImageViewCreateInfo texVewCI{
+		VkImageViewCreateInfo texViewCI{
 		  .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 		  .image = textures[i].image,  // just created
 		  .viewType = VK_IMAGE_VIEW_TYPE_2D,  // repeat
@@ -473,7 +511,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		    .layerCount = 1
 		  }
 		};
-		chk(vkCreateImageView(device, &texVewCI, nullptr, &textures[i].view));
+		chk(vkCreateImageView(device, &texViewCI, nullptr, &textures[i].view));
 
 	  // Upload
     //     c) copy texture to temporary buffer   
@@ -516,9 +554,9 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 	  chk(vkBeginCommandBuffer(cbOneTime, &cbOneTimeBI));
 
     //    f) First Barrier
-    // Transition layout from undefined to layout that allows us to transfer data to it
-    // (VK_IMAGE_LAYOUT_UNDEFINED ---> VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL). 
-		VkImageMemoryBarrier2 barrierTexImage{
+	  //       stage/access: NONE/NONE ---> TRANSFER/WRITE, 
+    //       layout:       UNDEFINED ---> TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier2 barrierTexImage{ // NONE/NONE ---> TRANSFER/WRITE
 			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
 			.srcStageMask = VK_PIPELINE_STAGE_2_NONE,
 			.srcAccessMask = VK_ACCESS_2_NONE,
@@ -529,7 +567,8 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 			.image = textures[i].image,
 			.subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = ktxTexture->numLevels, .layerCount = 1 }
 		};
-		VkDependencyInfo barrierTexInfo{ .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrierTexImage };
+		VkDependencyInfo barrierTexInfo{ .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+		  .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrierTexImage };
     vkCmdPipelineBarrier2(cbOneTime, &barrierTexInfo);
 
 
@@ -548,8 +587,9 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		vkCmdCopyBufferToImage(cbOneTime, imgSrcBuffer, textures[i].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(copyRegions.size()), copyRegions.data());
 
     //     h) Second barrier
+    //        stage/access: TRANSFER/WRITE ---> FRAGMENT_SHADER/READ
+	  //              layout: TRANSFER_DST_OPTIMAL ---> READ_ONLY_OPTIMAL
     // Transition the mip levels from transfer destination to a layout we can read from in our shader
-    // (VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL  ---> VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
 
 		VkImageMemoryBarrier2 barrierTexRead{
 			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -593,78 +633,125 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		};
 		chk(vkCreateSampler(device, &samplerCI, nullptr, &textures[i].sampler));
 
-    // clean up texture and store the descriptor
+    // clean up read ktx texture and store the descriptor
 		ktxTexture_Destroy(ktxTexture);
-		textureDescriptors.push_back({ 
+
+		textureDescriptors.push_back({   // VkDescriptorImageInfo
       .sampler = textures[i].sampler,
 		  .imageView = textures[i].view,
 		  .imageLayout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL
 		});
 	} // end for each of 3 textures
 
+
+  //---------------------------- DESCRIPTORS ----------------------------------
+
   // 14. Descriptor (indexing)
 
   // a) Descriptor Set Layout
+  //    = INTERFACE between application and shader for accessing resources (textures, buffers, etc.)
+  //    slot description - no actual data (updated in descriptor set by vkUpdateDescriptorSets in d)
+  //    FS will access 3 textures as combined image + sampler, binding = 0, type = combined image + sampler
+
+  // Here we use a variable-sized descriptor binding (VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT),
+  // which allows us to change the number of textures in the descriptor set at runtime.
+  // The maximum number of textures is set to 3/16 in the VkDescriptorSetLayoutBinding structure, but we can
+  // specify a different number when allocating the descriptor set.
+
+  // For fixed number of textures, drop the flag and use just .descriptorCount = 3 in VkDescriptorSetLayoutBinding
+  // - and declare texture [3] in shader
+  // - texture[] in shader requires VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT flag
+  //    and runtimeDescriptorArray enabled in VkPhysicalDeviceVulkan12Features when creating the logical device
+
+  // This flag can be omitted: just to show the bind-less pattern. We use 3 textures and do not change it
 	VkDescriptorBindingFlags descVariableFlag{
-    // a variable-sized descriptor binding whose size will be specified when a descriptor set is allocated using this layout.
-	  VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT
+    // a variable-sized descriptor binding
+    // its size will be specified when a descriptor set is allocated using this layout in c) 
+    VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT 
 	};
+
+  // array of VkDescriptorBindingFlags structures, one for each binding in the layout
   VkDescriptorSetLayoutBindingFlagsCreateInfo descBindingFlags{
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
     .bindingCount = 1,
     .pBindingFlags = &descVariableFlag
   };
-  VkDescriptorSetLayoutBinding descLayoutBindingTex{
+
+  // slot description - no actual data (updated in descriptor set by vkUpdateDescriptorSets)
+  // stage = FS, binding = 0, type = combined image + sampler, count = FS will access maximum of 3 textures
+  VkDescriptorSetLayoutBinding descLayoutBindingTex{ 
+    .binding = 0,  // binding number in shader - that was missing -- implicit 0
     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-    .descriptorCount = static_cast<uint32_t>(textures.size()),  // 3x textures
-    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+    .descriptorCount = 16, //static_cast<uint32_t>(textures.size()),  // maximum of 3(16) textures
+    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT // which shader stage(s) can access this descriptor
   };
+
+  // array of VkDescriptorSetLayoutBinding structures, one for each binding in the layout - here just one 
 	VkDescriptorSetLayoutCreateInfo descLayoutTexCI{
 	  .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-	  .pNext = &descBindingFlags,  // a variable-sized descriptor binding
+    .pNext = &descBindingFlags,  // array of variable-sized descriptor binding - here just one 
 	  .bindingCount = 1,
 	  .pBindings = &descLayoutBindingTex };
-	chk(vkCreateDescriptorSetLayout(device, &descLayoutTexCI, nullptr, &descriptorSetLayoutTex));
+
+  chk(vkCreateDescriptorSetLayout(device, &descLayoutTexCI, nullptr, &descriptorSetLayoutTex));
+
 
   // b) descriptor pool
+  //    - pool for allocating maxSets descriptor sets
+  //    - .poolSizeCount is the number of elements in pPoolSizes array just updated
+  //    - each set can hold .descriptorCount_i descriptors of a given type
+  //    - here we have a pool with a single descriptor pool with 3 textures as combined image + sampler
+
+  // Size of space for a single descriptor set with 3 textures as combined image + sampler
 	VkDescriptorPoolSize poolSize{
 	  .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 	  .descriptorCount = static_cast<uint32_t>(textures.size()) // 3x textures
 	};
+  // array of VkDescriptorPoolSize structures
+  // - here just one for a single descriptor set with 3 textures
 	VkDescriptorPoolCreateInfo descPoolCI{
 	  .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-	  .maxSets = 1,
-	  .poolSizeCount = 1,
-	  .pPoolSizes = &poolSize  // space for a single descriptor
+    .maxSets = 1, // maximum number of descriptor sets the pool can hold (here just one)
+    .poolSizeCount = 1, // number of elements in pPoolSizes array
+    .pPoolSizes = &poolSize  // space for a three image samplers in a single descriptor set
 	};
+  // pool of descriptors with a single descriptor set. The set can hold 3 textures as combined image + sampler 
 	chk(vkCreateDescriptorPool(device, &descPoolCI, nullptr, &descriptorPool));
 
+
   // c) Allocate descriptor sets
-	uint32_t variableDescCount{ static_cast<uint32_t>(textures.size()) };  // 3 textures
+
+  // array with the USED number of descriptors in the set - 1set, max 3 textures
+  // - if we want to change the number of textures, we can change this variable,
+  // - 3 (16) is maximum - set in VkDescriptorSetLayoutBinding descLayoutBindingTex.descriptorCount=3 (16) in a)
+	uint32_t variableDescCount{ static_cast<uint32_t>(textures.size()) };  // 3 textures of maximum
 	VkDescriptorSetVariableDescriptorCountAllocateInfo variableDescCountAI{
 	  .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO_EXT,
 	  .descriptorSetCount = 1,
-	  .pDescriptorCounts = &variableDescCount
+    .pDescriptorCounts = &variableDescCount  // << fix the variable number of descriptors in the set - 3 textures
 	};
+  // array of SetLayout structures - here just one for a single descriptor set with 3 textures
 	VkDescriptorSetAllocateInfo texDescSetAlloc{
 	  .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-	  .pNext = &variableDescCountAI,
+    .pNext = &variableDescCountAI, // if nNext forgotten, the descriptor set will have 0 texture instead of 3
 	  .descriptorPool = descriptorPool,
 	  .descriptorSetCount = 1,
 	  .pSetLayouts = &descriptorSetLayoutTex
 	};
 	chk(vkAllocateDescriptorSets(device, &texDescSetAlloc, &descriptorSetTex));
 
-  // d) Update descriptor set
+  // d) Update descriptor set = write the actual data (sampler, imageView, imageLayout) for each of 3 textures
 	VkWriteDescriptorSet writeDescSet{
 	  .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
 	  .dstSet = descriptorSetTex,
 	  .dstBinding = 0,
-	  .descriptorCount = static_cast<uint32_t>(textureDescriptors.size()),
+    .descriptorCount = static_cast<uint32_t>(textureDescriptors.size()), // 3 textures
 	  .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-	  .pImageInfo = textureDescriptors.data()
+    .pImageInfo = textureDescriptors.data() // array of (sampler, imageView, imageLayout) for each of 3 textures
 	};
 	vkUpdateDescriptorSets(device, 1, &writeDescSet, 0, nullptr);
+
+  //------------------------------- SHADERS -------------------------------------
 
   // 15. Initialize Slang shader compiler
   // a) create a global Slang session - connects to slang library
@@ -692,36 +779,63 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
   // 16. Load shader
 	Slang::ComPtr<slang::IModule> slangModule{ slangSession->loadModuleFromSource("triangle", "assets/shader.slang", nullptr, nullptr) };
 	Slang::ComPtr<ISlangBlob> spirv;
-	slangModule->getTargetCode(0, spirv.writeRef());
-	VkShaderModuleCreateInfo shaderModuleCI{ .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = spirv->getBufferSize(), .pCode = (uint32_t*)spirv->getBufferPointer() };
+  slangModule->getTargetCode(0, spirv.writeRef()); // writing to spirv blob - as &spirv
+
+  // 17. Create shader module
+	VkShaderModuleCreateInfo shaderModuleCI{
+	  .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+	  .codeSize = spirv->getBufferSize(),
+	  .pCode = (uint32_t*)spirv->getBufferPointer()
+	};
 
 	VkShaderModule shaderModule{};
 	chk(vkCreateShaderModule(device, &shaderModuleCI, nullptr, &shaderModule));
 
+  //----------------------------- PIPELINE ------------------------------------
+
   // 18. Pipeline
-  // a) Pipeline layout
-	VkPushConstantRange pushConstantRange{ .stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .size = sizeof(VkDeviceAddress) };
+  // a) Pipeline layout (interface between shader and application)
+
+  // Push constants (uniforms) - for each shader stage 
+	VkPushConstantRange pushConstantRange{
+	  .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+	  .size = sizeof(VkDeviceAddress) // uint64_t
+	};
 	VkPipelineLayoutCreateInfo pipelineLayoutCI{
 	  .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 	  .setLayoutCount = 1,
-	  .pSetLayouts = &descriptorSetLayoutTex, // from VkDescriptorSetAllocateInfo
+    .pSetLayouts = &descriptorSetLayoutTex, // from 14a) vkCreateDescriptorSetLayout (INTERFACE to theshader resources) - texture (sampler, imageView, imageLayout)
 	  .pushConstantRangeCount = 1,
-	  .pPushConstantRanges = &pushConstantRange
+    .pPushConstantRanges = &pushConstantRange // single pointer to uniform buffer for each frame
 	};
+
 	chk(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
+
 
   // b) Shader stages
 	std::vector<VkPipelineShaderStageCreateInfo> shaderStages{
-		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = shaderModule, .pName = "main"},
-		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shaderModule, .pName = "main" }
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+		     .module = shaderModule, .pName = "main"},
+		{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+		     .module = shaderModule, .pName = "main" }
 	};
 
+  // Vertex input description
+  //    see https ://vulkan-tutorial.com/Vertex_buffers/Vertex_input_description
+
   // c) vertex binding position of vertex attributes
+  //    - defines stride and input rate (vertex or instance) for each vertex
 	VkVertexInputBindingDescription vertexBinding{
 	  .binding = 0,
 	  .stride = sizeof(Vertex),
-	  .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX  // move to next each vertex shader invocation - attribute
+	            // VK_VERTEX_INPUT_RATE_INSTANCE: Move to the next after each instance
 	};
+
+  // Define the binding, location, format and offset of each attribute of the vertex
+  // - format uses color channels names, size in bytes of each and type (sfloat, int, uint, etc.)
+  // - defines implicitly the attribute byte-size
+  // - it is not written in the shader - the VSInput must match this description
 	std::vector<VkVertexInputAttributeDescription> vertexAttributes{
 		{ .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT },
 		{ .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal) },
@@ -736,50 +850,101 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexAttributes.size()),
 		.pVertexAttributeDescriptions = vertexAttributes.data(),
 	};
-	VkPipelineInputAssemblyStateCreateInfo inputAssemblyState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
-	std::vector<VkDynamicState> dynamicStates{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	VkPipelineDynamicStateCreateInfo dynamicState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dynamicStates.data() };
-	VkPipelineViewportStateCreateInfo viewportState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
-	VkPipelineRasterizationStateCreateInfo rasterizationState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .lineWidth = 1.0f };
-	VkPipelineMultisampleStateCreateInfo multisampleState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
-	VkPipelineDepthStencilStateCreateInfo depthStencilState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL };
-	VkPipelineColorBlendAttachmentState blendAttachment{ .colorWriteMask = 0xF };
-	VkPipelineColorBlendStateCreateInfo colorBlendState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &blendAttachment };
-	VkPipelineRenderingCreateInfo renderingCI{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &imageFormat, .depthAttachmentFormat = depthFormat };
+
+  VkPipelineInputAssemblyStateCreateInfo inputAssemblyState{ // primitive type
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+  };
+
+  // list of parts of the pipeline's fixed-function state are NOT baked into the pipeline - and are set in the command buffer at draw time
+  std::vector<VkDynamicState> dynamicStates{
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR
+  };
+  VkPipelineDynamicStateCreateInfo dynamicState{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    .dynamicStateCount = 2,  // or static_cast<uint32_t>(dynamicStates.size())
+    .pDynamicStates = dynamicStates.data()
+  };
+
+  VkPipelineViewportStateCreateInfo viewportState{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 }; // numbers matter
+    // pViewports, pScissors are ignored because they listed as dynamic states above (are NULL),
+    // and will be set in command buffer at draw time by vkCmdSetViewport / vkCmdSetScissor
+
+  // the rest must be set to default values
+  VkPipelineRasterizationStateCreateInfo rasterizationState{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,.lineWidth = 1.0f };
+
+  VkPipelineMultisampleStateCreateInfo multisampleState{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+
+  VkPipelineDepthStencilStateCreateInfo depthStencilState{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+    .depthTestEnable = VK_TRUE,
+    .depthWriteEnable = VK_TRUE,
+    .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL
+  };
+
+  VkPipelineColorBlendAttachmentState blendAttachment{ .colorWriteMask = 0xF };
+  VkPipelineColorBlendStateCreateInfo colorBlendState{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &blendAttachment };
+
+  VkPipelineRenderingCreateInfo renderingCI{  // -> pNext 
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+    .colorAttachmentCount = 1,
+    .pColorAttachmentFormats = &imageFormat, // in 7) Swapchain - format R8G8B8A8_SRGB
+    .depthAttachmentFormat = depthFormat // in 8) Depth attachment - format D32_SFLOAT_S8_UINT or D24_UNORM_S8_UINT 
+  };
 
   // e) set all to pipeline Create Info and create pipeline
 	VkGraphicsPipelineCreateInfo pipelineCI{
 		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
 		.pNext = &renderingCI,
 		.stageCount = 2,
-		.pStages = shaderStages.data(), 
-		.pVertexInputState = &vertexInputState,
-		.pInputAssemblyState = &inputAssemblyState,
-		.pViewportState = &viewportState,
+    .pStages = shaderStages.data(),             // 18b) shader src code compiled to SPIR-V
+    .pVertexInputState = &vertexInputState,     // 18d) stride, input rate, attribute location, format, offset
+    .pInputAssemblyState = &inputAssemblyState, // primitive type - triangle list
+		.pViewportState = &viewportState,           // Number of viewports and scissors [related to dynamicState]
 		.pRasterizationState = &rasterizationState,
 		.pMultisampleState = &multisampleState,
 		.pDepthStencilState = &depthStencilState,
 		.pColorBlendState = &colorBlendState,
-		.pDynamicState = &dynamicState,
+    .pDynamicState = &dynamicState,             // vector of dynamic states - viewport and scissor [related to viewportState]
 		.layout = pipelineLayout
 	};
 	chk(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline));
 
+  // TEST
+  chkFence(vkGetFenceStatus(device, fences[0]), 0);
+  chkFence(vkGetFenceStatus(device, fences[1]), 1);
+
+
+  //--------------------------- RENDER LOOP ----------------------------------
   // 19. Render loop
 	uint64_t lastTime{ SDL_GetTicks() };
 	bool quit{ false };
 	while (!quit) {
-
-	  // a) Sync
+    
+	  // a) Sync - wait for fence (info, that rendering finished and we can draw next frame)
 		chk(vkWaitForFences(device, 1, &fences[frameIndex], true, UINT64_MAX));
 		chk(vkResetFences(device, 1, &fences[frameIndex]));
 
-	// Rendering of frameIndex image:
-	// Ask the swapchain for the next imageIndex to render to
-	// and signal the present semaphore when finished
-	chkSwapchain(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex));  
+    // TEST
+    //chkFence(vkGetFenceStatus(device, fences[0]), 0);
+    //chkFence(vkGetFenceStatus(device, fences[1]), 1);
 
-	  // b) Update shader data
+    // b) acquire next image from swapchain
+  	// Rendering of frameIndex image:
+	  // Ask the swapchain for the next imageIndex to render to
+	  // and signal the present semaphore when finished
+	  chkSwapchain(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAcquiredSemaphores[frameIndex], VK_NULL_HANDLE, &imageIndex));
+
+    // TEST
+    //std::cout << "frameIndex = " << frameIndex << ", ";
+    //std::cout << "imageIndex = " << imageIndex << "\n";
+
+	  // c) Update shader data
 		shaderData.projection = glm::perspective(glm::radians(45.0f), (float)windowSize.x / (float)windowSize.y, 0.1f, 32.0f);
 		shaderData.view = glm::translate(glm::mat4(1.0f), camPos);
 		for (auto i = 0; i < 3; i++) {
@@ -788,7 +953,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		}
 		memcpy(shaderDataBuffers[frameIndex].allocationInfo.pMappedData, &shaderData, sizeof(ShaderData));
 
-	  // c) Build command buffer
+	  // d) Build (record) command buffer
 		auto cb = commandBuffers[frameIndex];
 		chk(vkResetCommandBuffer(cb, 0));  // should be implicit if commandBufferPool TRANSIENT
 
@@ -798,7 +963,10 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		chk(vkBeginCommandBuffer(cb, &cbBI)); // does implicit reset
 
 		std::array<VkImageMemoryBarrier2, 2> outputBarriers{
-			VkImageMemoryBarrier2{
+      // color image barrier
+      //   stage/access: COLOR_ATTACHMENT_OUTPUT/NULL ---> COLOR_ATTACHMENT_OUTPUT/COLOR_ATTACHMENT_READ|WRITE
+      //   layout: UNDEFINED ---> ATTACHMENT_OPTIMAL
+      VkImageMemoryBarrier2{
 				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
 				.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
 				.srcAccessMask = 0,
@@ -809,7 +977,10 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
         .image = swapchainImages[imageIndex],  // image to render to (got from swapchain)
 				.subresourceRange{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
 			},
-			VkImageMemoryBarrier2{
+      // depth image barrier
+      //   stage/access: LATE_FRAGMENT_TESTS/DEPTH_STENCIL_ATTACHMENT_WRITE ---> EARLY_FRAGMENT_TESTS/DEPTH_STENCIL_ATTACHMENT_WRITE
+      //   layout: UNDEFINED ---> ATTACHMENT_OPTIMAL
+      VkImageMemoryBarrier2{
 				.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
 				.srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
 				.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -885,7 +1056,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		vkCmdPipelineBarrier2(cb, &barrierPresentDependencyInfo);
 		chk(vkEndCommandBuffer(cb));
 
-	  // d) Submit to graphics queue
+	  // e) Submit command buffer to graphics queue
 		VkPipelineStageFlags waitStages = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 		VkSubmitInfo submitInfo{
 			.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -900,7 +1071,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		chk(vkQueueSubmit(queue, 1, &submitInfo, fences[frameIndex]));
     // 1. wait for image given by presentation engine
     // 2. execute command buffer cb and render to image
-    // 3. signal renderSemaphore when finished rendering image
+    // 3. signal renderCompleteSemaphore when finished rendering image
     // 4. signal fence when finished rendering image to CPU - can start next frame
     // 3. and 4. signal the same event - this submission finished executing on the
     //    GPU - but they wake different waiters:
@@ -908,7 +1079,10 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
     //      semaphore -> the GPU, holds back vkQueuePresentKHR until the image is drawn
     //    A fence reports completion to the CPU, a semaphore reports it to the GPU.
 
+    // f) increment frameIndex for next frame (modulo maxFramesInFlight)
 		frameIndex = (frameIndex + 1) % maxFramesInFlight;
+
+    // g) Present the rendered image to the screen
 		VkPresentInfoKHR presentInfo{
 			.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
 			.waitSemaphoreCount = 1,
@@ -919,7 +1093,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 		};
 		chkSwapchain(vkQueuePresentKHR(queue, &presentInfo));
 
-	  // e) Event polling
+	  // h) Poll events (mouse, keys, window resize)
 		float elapsedTime{ (SDL_GetTicks() - lastTime) / 1000.0f };
 		lastTime = SDL_GetTicks();
 		for (SDL_Event event; SDL_PollEvent(&event);) {
@@ -945,9 +1119,9 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 				}
 			}
 
-		  // f) Window resize
+		  // i) Window resize
 			if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-				updateSwapchain = true;
+        updateSwapchain = true; // will recreate swapchain and depth image - pipeline will remain the same
 			}
 		}
     // 20. Recreate swapchain
@@ -1032,7 +1206,7 @@ SDL_Window* window = SDL_CreateWindow("How to Vulkan (SDL)", 1280u, 720u, SDL_WI
 	vkDestroySwapchainKHR(device, swapchain, nullptr);
 	vkDestroySurfaceKHR(instance, surface, nullptr);
 	vkDestroyCommandPool(device, commandPool, nullptr);
-	// vkDestroyCommandPool(device, commandPool, nullptr); // should generate error
+	// vkDestroyCommandPool(device, commandPool, nullptr); // 2nd call should generate an error
 	vkDestroyShaderModule(device, shaderModule, nullptr);
 
 	vmaDestroyAllocator(allocator);
